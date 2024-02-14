@@ -1,1 +1,1 @@
-# py_duckdb
+duckdb recipes, mainl for spatial analysis.
