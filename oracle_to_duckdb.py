@@ -3,7 +3,7 @@ import cx_Oracle
 import pandas as pd
 import geopandas as gpd
 import duckdb
-from shapely.wkb import loads
+from shapely import wkt
 
 def connect_to_DB(username, password, hostname):
     """Returns a connection and cursor to the Oracle database."""
@@ -17,6 +17,7 @@ def connect_to_DB(username, password, hostname):
 
 def df_2_gdf(df, crs):
     """Return a GeoPandas GeoDataFrame based on a DataFrame with a Geometry column."""
+    df['SHAPE'] = df['SHAPE'].astype(str)
     df['geometry'] = gpd.GeoSeries.from_wkb(df['SHAPE'])
     gdf = gpd.GeoDataFrame(df, geometry='geometry')
     gdf.crs = "EPSG:" + str(crs)
@@ -28,7 +29,7 @@ sql = """
         CROWN_LANDS_FILE,
         TENURE_STATUS,
         ROUND(TENURE_AREA_IN_HECTARES, 2) AS AREA_HA,
-        SDO_UTIL.TO_WKBGEOMETRY(SHAPE) AS GEOMETRY
+        SDO_UTIL.TO_WKTGEOMETRY(SHAPE) AS GEOMETRY
     FROM 
         WHSE_TANTALIS.TA_CROWN_TENURES_SVW
     WHERE 
@@ -56,16 +57,23 @@ colNames= [desc[0] for desc in orcCur.description]
 
 dckCur.execute(f'''
                CREATE TABLE {tblName} (
-                   {", ".join(f"{col} VARCHAR" if col != "GEOMETRY" else f"{col} BLOB" for col in colNames)}
-                       )
-''')
+                   {", ".join(f"{col} VARCHAR" if col != "GEOMETRY" else f"{col} VARCHAR" for col in colNames)}
+                       )''')
+
+
+df_tables= dckCnx.sql("SHOW TABLES").df()
+
 
 for row in orcCur:
-    wkb_geometry= loads(row[-1])
-    dckCur.execute(f'''
-        INSERT INTO {tblName} ({", ".join(colNames)})
-        VALUES ({", ".join("ST_GeomFromWKB(?)" if col == "GEOMETRY" else "?" for col in colNames)})
-    ''', row[:-1] + (wkb_geometry,))
-
+    wkt_geometry= wkt.dumps(row[-1], output_dimension=2)
+    
+    query= f"""
+    INSERT INTO {tblName} 
+         (CROWN_LANDS_FILE, TENURE_STATUS, GEOMETRY)
+  VALUES ({'row[0]'},{'row[1]'}, {'row[2]'})
+            """
+    dckCur.execute(query)
+                               
+                               
 # Commit changes
 dckCnx.commit()
