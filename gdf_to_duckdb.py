@@ -15,14 +15,13 @@ def connect_to_duckdb (db= ':memory:'):
 def gdf_to_duckdb (conn, gdf, table_name):
     """Insert data from a gdf into a duckdb table """
     
-    gdf['geometry'] = gdf['geometry'].apply(lambda x: wkb.dumps(x, output_dimension=2))
+    gdf['geometry']= gdf['geometry'].apply(lambda x: wkb.dumps(x, output_dimension=2))
 
     create_table_query = f"""
     CREATE OR REPLACE TABLE {table_name} AS
       SELECT * EXCLUDE geometry, ST_GeomFromWKB(geometry) AS geometry
       FROM gdf;
     """
-
     conn.execute(create_table_query)
     
     
