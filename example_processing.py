@@ -10,7 +10,6 @@ import pandas as pd
 import geopandas as gpd
 from shapely import wkb
 
-
 class OracleConnector:
     def __init__(self, dbname='BCGW'):
         self.dbname = dbname
@@ -66,40 +65,28 @@ class DuckDBConnector:
             self.conn = None
 
 
-def esri_to_gdf (aoi):
-    """Returns a Geopandas file (gdf) based on 
-       an ESRI format vector (shp or featureclass/gdb)"""
-    
-    if '.shp' in aoi: 
-        gdf = gpd.read_file(aoi)
-    
-    elif '.gdb' in aoi:
-        l = aoi.split ('.gdb')
-        gdb = l[0] + '.gdb'
-        fc = os.path.basename(aoi)
-        gdf = gpd.read_file(filename= gdb, layer= fc)
-        
-    else:
-        raise Exception ('Format not recognized. Please provide a shp or featureclass (gdb)!')
-    
-    return gdf
+def get_wshd_list(orcCnx):
+    """Return the list of watershed intersecting the WHAs """
+    sql="""
+        SELECT DISTINCT
+            wsh.WATERSHED_FEATURE_ID 
+        FROM 
+            WHSE_BASEMAPPING.FWA_ASSESSMENT_WATERSHEDS_POLY wsh
+            JOIN WHSE_WILDLIFE_MANAGEMENT.WCP_WHA_PROPOSED_SP wha
+                ON SDO_RELATE(wsh.GEOMETRY, wha.SHAPE, 'mask=ANYINTERACT')='TRUE' 
+                    AND wha.WHA_TAG IN ('4-282', '4-287', '4-283', '4-312', '4-281', 
+                                '4-288', '4-307', '4-286', '4-284', '4-285', '4-306') 
+        """
+    df= pd.read_sql(sql, orcCnx) 
+    wshd_lst= ",".join(str(x) for x in df['WATERSHED_FEATURE_ID'].to_list())
+      
+    return wshd_lst 
 
-
-def gdf_to_duckdb (conn, gdf, table_name):
-    """Insert data from a gdf into a duckdb table """
     
-    gdf['geometry']= gdf['geometry'].apply(lambda x: wkb.dumps(x, output_dimension=2))
-
-    create_table_query = f"""
-    CREATE OR REPLACE TABLE {table_name} AS
-      SELECT * EXCLUDE geometry, ST_GeomFromWKB(geometry) AS geometry
-      FROM gdf;
-    """
-    conn.execute(create_table_query)
-    
-    
-def load_Orc_sql():
+def load_Orc_sql(wshd_lst):
     orSql= {}
+    
+    
     orSql['wha']="""
         SELECT
             WHA_TAG,
@@ -111,48 +98,66 @@ def load_Orc_sql():
             WHA_TAG IN ('4-282', '4-287', '4-283', '4-312', '4-281', 
                         '4-288', '4-307', '4-286', '4-284', '4-285', '4-306')
         """
-        
-    orSql['harvested_ctb']="""
+
+    orSql['watersheds']=f"""
+        SELECT
+            wsh.WATERSHED_FEATURE_ID,
+            SDO_UTIL.TO_WKTGEOMETRY(wsh.GEOMETRY) AS GEOMETRY
+        FROM 
+            WHSE_BASEMAPPING.FWA_ASSESSMENT_WATERSHEDS_POLY wsh
+        WHERE        
+            wsh.WATERSHED_FEATURE_ID IN ({wshd_lst})
+            """
+            
+    orSql['harvested_ctb']=f"""
         SELECT
             ctb.VEG_CONSOLIDATED_CUT_BLOCK_ID,
             ctb.HARVEST_YEAR,
             SDO_UTIL.TO_WKTGEOMETRY(ctb.SHAPE) AS GEOMETRY
         FROM 
             WHSE_FOREST_VEGETATION.VEG_CONSOLIDATED_CUT_BLOCKS_SP ctb
-            JOIN WHSE_WILDLIFE_MANAGEMENT.WCP_WHA_PROPOSED_SP wha
-                ON SDO_RELATE(ctb.SHAPE, wha.SHAPE, 'mask=ANYINTERACT')='TRUE' 
-        WHERE        
-            wha.WHA_TAG IN ('4-282', '4-287', '4-283', '4-312', '4-281', 
-                                    '4-288', '4-307', '4-286', '4-284', '4-285', '4-306') 
-            AND ctb.HARVEST_YEAR >= 2016
+        WHERE 
+            ctb.HARVEST_YEAR >= 2016 
+            AND SDO_ANYINTERACT (ctb.SHAPE, 
+                                 (SELECT SDO_AGGR_UNION(SDOAGGRTYPE(wsh.GEOMETRY, 1)) AS geom
+                                  FROM WHSE_BASEMAPPING.FWA_ASSESSMENT_WATERSHEDS_POLY wsh 
+                                  WHERE wsh.WATERSHED_FEATURE_ID IN ({wshd_lst})
+                                      )
+                                         ) = 'TRUE'
         """
-
-    orSql['approved_ctb']="""
+        
+    orSql['approved_ctb']=f"""
         SELECT
             frs.MAP_LABEL,
             SDO_UTIL.TO_WKTGEOMETRY(frs.GEOMETRY) AS GEOMETRY
         FROM 
             WHSE_FOREST_TENURE.FTEN_HARVEST_AUTH_POLY_SVW frs
-            JOIN WHSE_WILDLIFE_MANAGEMENT.WCP_WHA_PROPOSED_SP wha
-                 ON SDO_RELATE(frs.GEOMETRY, wha.SHAPE, 'mask=ANYINTERACT')='TRUE' 
         WHERE 
             frs.LIFE_CYCLE_STATUS_CODE = 'PENDING'
-            AND wha.WHA_TAG IN ('4-282', '4-287', '4-283', '4-312', '4-281', 
-                                            '4-288', '4-307', '4-286', '4-284', '4-285', '4-306') 
+            AND SDO_ANYINTERACT (frs.GEOMETRY, 
+                                 (SELECT SDO_AGGR_UNION(SDOAGGRTYPE(wsh.GEOMETRY, 1)) AS geom
+                                  FROM WHSE_BASEMAPPING.FWA_ASSESSMENT_WATERSHEDS_POLY wsh 
+                                  WHERE wsh.WATERSHED_FEATURE_ID IN ({wshd_lst})
+                                      )
+                                         ) = 'TRUE'
         """
-            
-    orSql['watersheds']="""
+        
+    orSql['streams']=f"""
         SELECT
-            wsh.WATERSHED_FEATURE_ID,
-            SDO_UTIL.TO_WKTGEOMETRY(wsh.GEOMETRY) AS GEOMETRY
-        FROM 
-            WHSE_BASEMAPPING.FWA_ASSESSMENT_WATERSHEDS_POLY wsh
-            JOIN WHSE_WILDLIFE_MANAGEMENT.WCP_WHA_PROPOSED_SP wha
-                ON SDO_RELATE(wsh.GEOMETRY, wha.SHAPE, 'mask=ANYINTERACT')='TRUE' 
-        WHERE        
-            wha.WHA_TAG IN ('4-282', '4-287', '4-283', '4-312', '4-281', 
-                                    '4-288', '4-307', '4-286', '4-284', '4-285', '4-306')
-            """
+            str.LINEAR_FEATURE_ID,
+            SDO_UTIL.TO_WKTGEOMETRY(SDO_CS.MAKE_2D(str.GEOMETRY)) AS GEOMETRY
+        FROM
+            WHSE_BASEMAPPING.FWA_STREAM_NETWORKS_SP str
+        WHERE 
+            SDO_ANYINTERACT (str.GEOMETRY, 
+                                 (SELECT SDO_AGGR_UNION(SDOAGGRTYPE(wsh.GEOMETRY, 1)) AS geom
+                                  FROM WHSE_BASEMAPPING.FWA_ASSESSMENT_WATERSHEDS_POLY wsh 
+                                  WHERE wsh.WATERSHED_FEATURE_ID IN ({wshd_lst})
+                                      )
+                                         ) = 'TRUE' 
+        """            
+
+            
     return orSql
   
 
@@ -255,32 +260,124 @@ def load_dck_sql():
             ON 
                 ST_Intersects(rds.geometry, wha.geometry)
                    """
-                   
-                   
+                            
     return dkSql    
 
 
-def oracle_2_duckdb (orcCnx, dckCnx, dict_sqls):
-    """Insert data from Oracle into a duckdb table"""
-    tables= {}
-    counter = 1
-    for k, v in dict_sqls.items():
-        print(f'..adding table {counter} of {len(dict_sqls)}: {k}')
-        df= pd.read_sql(v, orcCnx)
+def esri_to_gdf (aoi):
+    """Returns a Geopandas file (gdf) based on 
+       an ESRI format vector (shp or featureclass/gdb)"""
     
-        create_table_query = f"""
+    if '.shp' in aoi: 
+        gdf = gpd.read_file(aoi)
+    
+    elif '.gdb' in aoi:
+        l = aoi.split ('.gdb')
+        gdb = l[0] + '.gdb'
+        fc = os.path.basename(aoi)
+        gdf = gpd.read_file(filename= gdb, layer= fc)
+        
+    else:
+        raise Exception ('Format not recognized. Please provide a shp or featureclass (gdb)!')
+    
+    return gdf
+
+
+def gdf_to_duckdb (dckCnx, loc_dict):
+    """Insert data from a gdfs into a duckdb table """
+    tables = {}
+    counter= 1
+    for k, v in loc_dict.items():
+        print (f'..adding table {counter} of {len(loc_dict)}: {k}')
+        print ('....export from gdb')
+        df= esri_to_gdf (v)
+        df['GEOMETRY']= df['geometry'].apply(lambda x: wkb.dumps(x, output_dimension=2))
+        df = df.drop(columns=['geometry'])
+        
+        dck_tab_list= dckCnx.execute('SHOW TABLES').df()['name'].to_list()
+        
+        if k in dck_tab_list:
+            dck_row_count= dckCnx.execute(f'SELECT COUNT(*) FROM {k}').fetchone()[0]
+            dck_col_nams= dckCnx.execute(f"""SELECT column_name 
+                                             FROM INFORMATION_SCHEMA.COLUMNS 
+                                             WHERE table_name = '{k}'""").df()['column_name'].to_list()
+                
+            if (dck_row_count != len(df)) or (set(list(df.columns)) != set(dck_col_nams)):
+                print ('....import to Duckdb')
+                create_table_query = f"""
+                CREATE OR REPLACE TABLE {k} AS
+                  SELECT * EXCLUDE geometry, ST_GeomFromWKB(geometry) AS GEOMETRY
+                  FROM df;
+                """
+                dckCnx.execute(create_table_query)
+            else:
+                print('....data already in db: skip importing')
+                pass
+        
+        else:
+            print ('....import to Duckdb')
+            create_table_query = f"""
             CREATE OR REPLACE TABLE {k} AS
-              SELECT * EXCLUDE GEOMETRY, 
-              ST_GeomFromText(GEOMETRY) AS geometry
+              SELECT * EXCLUDE geometry, ST_GeomFromWKB(geometry) AS GEOMETRY
               FROM df;
-                  """
-        dckCnx.execute(create_table_query)
+            """
+            dckCnx.execute(create_table_query)
+            
         
         df = df.drop(columns=['GEOMETRY'])
-        tables[k]= df
-    
+        
+        tables[k] = df
+        
         counter+= 1
-     
+        
+        return tables
+        
+        
+def oracle_2_duckdb(orcCnx, dckCnx, dict_sqls):
+    """Insert data from Oracle into a duckdb table"""
+    tables = {}
+    counter = 1
+    
+    for k, v in dict_sqls.items():
+        print(f'..adding table {counter} of {len(dict_sqls)}: {k}')
+        print('....export from Oracle')
+        df = pd.read_sql(v, orcCnx)
+
+        dck_tab_list= dckCnx.execute('SHOW TABLES').df()['name'].to_list()
+        
+        if k in dck_tab_list:
+            dck_row_count= dckCnx.execute(f'SELECT COUNT(*) FROM {k}').fetchone()[0]
+            dck_col_nams= dckCnx.execute(f"""SELECT column_name 
+                                             FROM INFORMATION_SCHEMA.COLUMNS 
+                                             WHERE table_name = '{k}'""").df()['column_name'].to_list()
+                
+            if (dck_row_count != len(df)) or (set(list(df.columns)) != set(dck_col_nams)):
+                print ('....import to Duckdb')
+                create_table_query = f"""
+                CREATE OR REPLACE TABLE {k} AS
+                  SELECT * EXCLUDE geometry, ST_GeomFromText(geometry) AS GEOMETRY
+                  FROM df;
+                """
+                dckCnx.execute(create_table_query)
+            else:
+                print('....data already in db: skip importing')
+                pass
+        
+        else:
+            print ('....import to Duckdb')
+            create_table_query = f"""
+            CREATE OR REPLACE TABLE {k} AS
+              SELECT * EXCLUDE geometry, ST_GeomFromText(geometry) AS GEOMETRY
+              FROM df;
+            """
+            dckCnx.execute(create_table_query)
+      
+        df = df.drop(columns=['GEOMETRY'])
+        
+        tables[k] = df
+      
+        counter += 1
+
     return tables
 
 
@@ -309,20 +406,23 @@ if __name__ == "__main__":
     orcCnx= Oracle.connection
     
     # Connect to duckdb
-    Duckdb= DuckDBConnector()
+    Duckdb= DuckDBConnector(db='wha_proj.db')
     Duckdb.connect_to_db()
     dckCnx= Duckdb.conn
     
-    print ('load local datasets')
-    print ('..load integrated roads')
-    aoi= os.path.join(wks,'test.gdb','integrated_roads_2021')
-    gdf_r= esri_to_gdf (aoi)
-    gdf_to_duckdb (dckCnx, gdf_r, 'roads')
+    print ('\nLoad local datasets')
+    gdb= os.path.join(wks,'test.gdb')
+    loc_dict={}
+    loc_dict['roads']= os.path.join(gdb, 'integrated_roads_2021')
+    gdbTables= gdf_to_duckdb (dckCnx, loc_dict)
     
     try:
         print ('\nLoad BCGW datasets') 
-        orSql= load_Orc_sql ()
-        tables= oracle_2_duckdb (orcCnx, dckCnx, orSql)
+        print('..getting watersheds list')
+        wshd_lst= get_wshd_list(orcCnx)
+        
+        orSql= load_Orc_sql (wshd_lst)
+        orcTables= oracle_2_duckdb (orcCnx, dckCnx, orSql)
         
         print ('\nRun duckdb queries')
         dk_sql= load_dck_sql()
